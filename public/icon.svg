@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Desk Deck">
+  <rect width="512" height="512" fill="#000000" />
+  <g fill="none" stroke="#5b8cff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="104" y="112" width="304" height="216" rx="40" />
+    <circle cx="256" cy="220" r="52" stroke-width="14" />
+    <path d="M196 392h120M256 328v64" />
+  </g>
+  <g fill="none" stroke="#2ee6a8" stroke-width="14" stroke-linecap="round">
+    <path d="M152 264h40M320 264h40M256 292v26" />
+  </g>
+</svg>

@@ -1,0 +1,17 @@
+{
+  "name": "phone-dock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn a spare phone into a desk dock: clock, weather, PC stats, stream deck and a Last.fm now-playing display.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "systeminformation": "^5.33.16"
+  }
+}

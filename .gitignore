@@ -1,0 +1,7 @@
+node_modules/
+config.json
+*.log
+.freebuff-chat-dump.txt
+.freebuff/
+.claude/
+.server.log
