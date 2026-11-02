@@ -43,7 +43,7 @@ Default font across all themes: **Outfit** (self-hosted, 32 KB latin WOFF2). Swi
 git clone https://github.com/SC136/phone-dock
 cd phone-dock
 npm install
-npm start
+npm start          # or: npm run tray (runs in Windows system tray)
 ```
 
 The terminal prints the URL:
@@ -52,6 +52,9 @@ The terminal prints the URL:
 Open on the phone (same Wi-Fi):
   http://192.168.1.x:4321
 ```
+
+- **Hide to system tray:** Press `h` in the terminal (or run `npm run tray`) to send Desk Deck to the Windows system tray and close the terminal window.
+- **Tray icon:** Right-click the taskbar icon to open the dashboard, copy your phone URL, restart the server, or exit.
 
 Copy that into Chrome on the phone, then **Add to Home screen** to run it without browser chrome.
 

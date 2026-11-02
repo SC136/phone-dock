@@ -12,13 +12,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import si from 'systeminformation';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
+const isWindows = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
 
 // ---------------------------------------------------------------------------
 // config
@@ -247,17 +249,62 @@ async function fastSample() {
   }
 }
 
+const WIN_THERMAL_SCRIPT = `
+try {
+  $samples = (Get-Counter "\\\\Thermal Zone Information(*)\\\\High Precision Temperature" -ErrorAction Stop).CounterSamples
+  $target = $samples | Where-Object { $_.InstanceName -match "thrm|cpu|pkg|package" } | Select-Object -First 1
+  if (-not $target) { $target = $samples | Sort-Object CookedValue -Descending | Select-Object -First 1 }
+  if ($target -and $target.CookedValue -gt 2732) {
+    [math]::Round(($target.CookedValue - 2732) / 10)
+    exit
+  }
+} catch {}
+try {
+  $samples = (Get-Counter "\\\\Thermal Zone Information(*)\\\\Temperature" -ErrorAction Stop).CounterSamples
+  $target = $samples | Where-Object { $_.InstanceName -match "thrm|cpu|pkg|package" } | Select-Object -First 1
+  if (-not $target) { $target = $samples | Sort-Object CookedValue -Descending | Select-Object -First 1 }
+  if ($target -and $target.CookedValue -gt 273) {
+    [math]::Round($target.CookedValue - 273.15)
+    exit
+  }
+} catch {}
+`;
+
+function getWindowsCpuTemp() {
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', WIN_THERMAL_SCRIPT],
+      { timeout: 3000, windowsHide: true },
+      (err, stdout) => {
+        if (err || !stdout) return resolve(null);
+        const val = parseInt(stdout.trim(), 10);
+        resolve(!isNaN(val) && val > 0 && val < 125 ? val : null);
+      }
+    );
+  });
+}
+
+// ponytail: reads Windows Performance Counter thermal zone; upgrade if vendor SDK (Intel XTU/NVAPI) is needed.
+async function readCpuTemperature() {
+  if (isWindows) {
+    const winTemp = await getWindowsCpuTemp().catch(() => null);
+    if (winTemp != null) return winTemp;
+  }
+  const siTemp = await si.cpuTemperature().catch(() => ({}));
+  return siTemp.main > 0 ? Math.round(siTemp.main) : siTemp.max > 0 ? Math.round(siTemp.max) : null;
+}
+
 async function mediumSample() {
   if (busy.medium) return;
   busy.medium = true;
   try {
     const [temp, fsList, procs] = await Promise.all([
-      si.cpuTemperature().catch(() => ({})),
+      readCpuTemperature(),
       si.fsSize().catch(() => []),
       si.processes().catch(() => ({ list: [] })),
     ]);
-    // On Windows the ACPI thermal zone often needs an elevated shell; null means "unavailable".
-    stats.cpu.temp = temp.main > 0 ? Math.round(temp.main) : temp.max > 0 ? Math.round(temp.max) : null;
+    stats.cpu.temp = temp;
     stats.disks = (fsList || [])
       .filter((d) => d.size > 0)
       .map((d) => ({ mount: d.mount, use: round1(d.use) ?? 0, used: d.used, size: d.size }))
@@ -524,8 +571,6 @@ async function getWeather({ lat, lon, label } = {}) {
 
 const MEDIA_KEYS = { volume_up: 175, volume_down: 174, mute: 173, next: 176, prev: 177, play_pause: 179 };
 const DETACHED = { detached: true, stdio: 'ignore', windowsHide: true };
-const isWindows = process.platform === 'win32';
-const isMac = process.platform === 'darwin';
 
 // Media keys go through user32 keybd_event: WScript's SendKeys only types characters
 // and cannot produce VK_VOLUME_* codes. One PowerShell process is kept alive (and
@@ -795,6 +840,51 @@ const accountLabel = (c) => {
   return who.slice(0, 22);
 };
 
+function combineAntigravity(accounts) {
+  const agAccounts = accounts.filter((a) => a.provider === 'antigravity');
+  if (agAccounts.length <= 1) return accounts;
+
+  const others = accounts.filter((a) => a.provider !== 'antigravity');
+  const windowMap = new Map();
+
+  for (const acct of agAccounts) {
+    for (const w of acct.windows) {
+      const existing = windowMap.get(w.name);
+      if (!existing) {
+        windowMap.set(w.name, {
+          name: w.name,
+          used: w.used || 0,
+          total: w.total || 0,
+          unit: w.unit || '',
+          resets: w.reset ? [w.reset] : [],
+        });
+      } else {
+        existing.used += w.used || 0;
+        existing.total += w.total || 0;
+        if (w.reset) existing.resets.push(w.reset);
+      }
+    }
+  }
+
+  const combinedWindows = Array.from(windowMap.values())
+    .map((w) => {
+      const percent = w.total > 0 ? Math.min(100, (w.used / w.total) * 100) : 0;
+      const reset = w.resets.length ? w.resets.sort()[0] : null;
+      return { name: w.name, used: w.used, total: w.total, unit: w.unit, percent, reset };
+    })
+    .sort((x, y) => y.percent - x.percent);
+
+  const combined = {
+    provider: 'antigravity',
+    label: `${agAccounts.length} accounts`,
+    plan: agAccounts[0]?.plan || 'Antigravity',
+    limitReached: agAccounts.every((a) => a.limitReached),
+    windows: combinedWindows,
+  };
+
+  return [...others, combined].sort((x, y) => y.windows[0].percent - x.windows[0].percent);
+}
+
 // Quota windows come from the upstream providers, so each call can take seconds.
 // Refresh them in the background and always answer from the cache.
 async function refreshQuotas(base) {
@@ -818,8 +908,7 @@ async function refreshQuotas(base) {
       }
     };
     await Promise.all([worker(), worker(), worker()]);
-    accounts.sort((x, y) => y.windows[0].percent - x.windows[0].percent);
-    quotaCache.accounts = accounts;
+    quotaCache.accounts = combineAntigravity(accounts);
     quotaCache.at = Date.now();
     agentsCache.at = 0; // let the next read pick the new accounts up
   } catch {
@@ -1025,6 +1114,7 @@ server.listen(config.port, '0.0.0.0', async () => {
   fastSample();
   mediumSample();
   slowSample();
+  readAgents().catch(() => {});
 
   const urls = lanAddresses().map((ip) => `  http://${ip}:${config.port}`);
   console.log(`\n${config.title} is running.\n`);
@@ -1044,4 +1134,40 @@ server.listen(config.port, '0.0.0.0', async () => {
     );
   }
   console.log('\nFirst run on the phone but nothing loads? Allow Node.js through the Windows firewall\nfor private networks, or add a rule for TCP port ' + config.port + '.\n');
+
+  if (isWindows && process.stdin.isTTY) {
+    console.log("Press [h] to send to system tray (frees this terminal)\n");
+    setupTrayKey();
+  }
 });
+
+function setupTrayKey() {
+  try {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (key) => {
+      if (key === '\u0003') {
+        process.exit(0);
+      }
+      if (key.toLowerCase() === 'h' || key.toLowerCase() === 't') {
+        console.log('\n[tray] Moving to system tray... You can now close this terminal.\n');
+        const psScript = path.join(ROOT, 'tray.ps1');
+        spawn(
+          'powershell.exe',
+          ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', psScript],
+          {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          }
+        ).unref();
+        setTimeout(() => {
+          process.exit(0);
+        }, 300);
+      }
+    });
+  } catch {
+    /* stdin not a TTY or raw mode unavailable */
+  }
+}

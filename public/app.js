@@ -1082,6 +1082,12 @@ async function loadAgents({ soft = false, force = false } = {}) {
   state.agentsAt = Date.now();
   renderAgents();
   renderAmbient();
+
+  if (state.agents?.quotaLoading && state.agents?.reachable) {
+    setTimeout(() => {
+      if (document.visibilityState !== 'hidden') loadAgents({ soft: true });
+    }, 3500);
+  }
 }
 
 // `?demo` shows how the page looks with sample data, so the layout can be judged
@@ -1263,8 +1269,11 @@ function renderAmbient() {
   const cpu = s?.cpu || {};
   const mem = s?.mem || {};
   const disk = s?.disks?.[0];
+  const cpuLabel = cpu.temp != null
+    ? `${Math.round(cpu.load || 0)}%  ·  ${cpu.temp}°`
+    : `${Math.round(cpu.load || 0)}%`;
   $('#ab-pc').innerHTML = s
-    ? miniRow('CPU', `${Math.round(cpu.load || 0)}%`, cpu.load) +
+    ? miniRow('CPU', cpuLabel, cpu.load) +
       miniRow('Memory', `${Math.round(mem.percent || 0)}%`, mem.percent) +
       (disk ? miniRow(`Disk ${disk.mount}`, `${disk.use}%`, disk.use) : '') +
       miniRow('Network', `↓ ${fmtRate(s.net?.rx)}   ·   ↑ ${fmtRate(s.net?.tx)}`)
@@ -1284,7 +1293,7 @@ function renderAmbient() {
           return miniRow(name, `${pct}%`, pct);
         })
         .join('')
-    : `<div class="row plain"><span>${ag?.reachable ? 'No quota windows yet' : 'Agents not connected'}</span></div>`;
+    : `<div class="row plain"><span>${ag?.quotaLoading ? 'Loading quotas…' : ag?.reachable ? 'No quota windows yet' : 'Agents not connected'}</span></div>`;
 
   const track = d?.nowPlaying || d?.lastPlayed;
   const configured = Boolean(d && d.configured !== false);
@@ -1441,6 +1450,7 @@ function setOnline(ok) {
   if (state.online === ok) return;
   state.online = ok;
   DOM.app.classList.toggle('offline', !ok);
+  document.documentElement.classList.toggle('is-offline', !ok);
 }
 
 // Browsers allow only ~6 connections per host. A background tab that keeps its live

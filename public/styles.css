@@ -886,6 +886,25 @@ html.nodock #dock { display: none; }
 html.nodock #stage { left: var(--safe-l); }
 html.nodock .page-in { padding-bottom: calc(var(--safe-b) + 14px); }
 
+/* Offline pill — only visible in fullscreen (nodock) mode */
+#offline-pill {
+  display: none;
+  position: fixed;
+  top: max(env(safe-area-inset-top), 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  background: var(--bad);
+  color: #fff;
+  font: 600 11px/1 var(--font-ui);
+  letter-spacing: .04em;
+  padding: 5px 14px;
+  border-radius: 99px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+html.nodock.is-offline #offline-pill { display: block; }
+
 /* Font choice (Settings → Font) overrides the theme's typeface. Last, so it wins. */
 :root[data-font='outfit'] { --font-ui: 'Outfit', system-ui, sans-serif; --font-num: 'Outfit', system-ui, sans-serif; }
 .num, .ring-v, .ah, .ah b { font-variant-numeric: tabular-nums; }
