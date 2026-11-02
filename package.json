@@ -6,7 +6,7 @@
   "description": "Turn a spare phone into a desk dock: clock, weather, PC stats, stream deck and a Last.fm now-playing display.",
   "scripts": {
     "start": "node server.js",
-    "tray": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process powershell.exe -ArgumentList '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File .\\tray.ps1'\"",
+    "tray": "wscript //B deskdeck.vbs",
     "dev": "node --watch server.js"
   },
   "engines": {

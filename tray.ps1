@@ -9,35 +9,76 @@ if (-not $mutex.WaitOne(0, $false)) {
     exit
 }
 
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class WinDpiAwareness {
+  public static IntPtr PerMonitorAwareV2 { get { return new IntPtr(-4); } }
+  public static IntPtr PerMonitorAware { get { return new IntPtr(-3); } }
+
+  [DllImport("user32.dll")]
+  public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+  [DllImport("shcore.dll")]
+  public static extern int SetProcessDpiAwareness(int value);
+
+  [DllImport("user32.dll")]
+  public static extern bool SetProcessDPIAware();
+}
+"@
+
+function Enable-HighDpiAwareness {
+  foreach ($ctx in @([WinDpiAwareness]::PerMonitorAwareV2, [WinDpiAwareness]::PerMonitorAware)) {
+    try {
+      if ([WinDpiAwareness]::SetProcessDpiAwarenessContext($ctx)) { break }
+    } catch {}
+  }
+  try { [WinDpiAwareness]::SetProcessDpiAwareness(2) | Out-Null } catch {}
+  try { [WinDpiAwareness]::SetProcessDPIAware() | Out-Null } catch {}
+}
+
+Enable-HighDpiAwareness
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
-$root = $PSScriptRoot
-if (-not $root) { $root = (Get-Location).Path }
+$root = 'C:\code\phone_dock'
+if ($PSScriptRoot -and (Test-Path $PSScriptRoot)) { $root = $PSScriptRoot }
 Set-Location $root
 
-$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $nodeExe) { $nodeExe = 'node' }
+$nodeExe = 'C:\Program Files\nodejs\node.exe'
+if (-not (Test-Path $nodeExe)) {
+    $nodeCmd = (Get-Command node -ErrorAction SilentlyContinue).Source
+    if ($nodeCmd) { $nodeExe = $nodeCmd } else { $nodeExe = 'node' }
+}
 
 function Get-LanUrl {
-    $ips = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'Wi-Fi*','Ethernet*' -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127|169\.254)' }).IPAddress
-    if (-not $ips) {
-        $ips = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127|169\.254)' }).IPAddress
-    }
-    $first = $ips | Select-Object -First 1
-    if ($first) { return "http://$($first):4321" }
+    try {
+        $ips = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'Wi-Fi*','Ethernet*' -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127|169\.254)' }).IPAddress
+        if (-not $ips) {
+            $ips = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127|169\.254)' }).IPAddress
+        }
+        $first = $ips | Select-Object -First 1
+        if ($first) { return "http://$($first):4321" }
+    } catch {}
     return "http://127.0.0.1:4321"
 }
 
 # Check if node server.js is already listening on 4321
-$conn = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
-$script:serverProc = $null
+$conn = $null
+try {
+    $conn = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
+} catch {}
 
+$script:serverProc = $null
 if ($conn) {
-    $script:serverProc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+    try {
+        $script:serverProc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+    } catch {}
 } else {
     $script:serverProc = Start-Process -FilePath $nodeExe -ArgumentList "server.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
 }
@@ -103,10 +144,12 @@ $menu.Items.Add("-") | Out-Null
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({
-    $conn = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
-    if (-not $conn) {
-        $script:serverProc = Start-Process -FilePath $nodeExe -ArgumentList "server.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
-    }
+    try {
+        $active = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
+        if (-not $active) {
+            $script:serverProc = Start-Process -FilePath $nodeExe -ArgumentList "server.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
+        }
+    } catch {}
 })
 $timer.Start()
 
