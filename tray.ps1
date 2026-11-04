@@ -46,11 +46,13 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
-$root = 'C:\code\phone_dock'
-if ($PSScriptRoot -and (Test-Path $PSScriptRoot)) { $root = $PSScriptRoot }
+$root = $PSScriptRoot
+if (-not $root -or -not (Test-Path $root)) { $root = (Get-Location).Path }
 Set-Location $root
 
-$nodeExe = 'C:\Program Files\nodejs\node.exe'
+$nodeExe = Join-Path $root 'node.exe'
+if (-not (Test-Path $nodeExe)) { $nodeExe = Join-Path $root 'bin\node.exe' }
+if (-not (Test-Path $nodeExe)) { $nodeExe = 'C:\Program Files\nodejs\node.exe' }
 if (-not (Test-Path $nodeExe)) {
     $nodeCmd = (Get-Command node -ErrorAction SilentlyContinue).Source
     if ($nodeCmd) { $nodeExe = $nodeCmd } else { $nodeExe = 'node' }

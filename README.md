@@ -39,11 +39,26 @@ Default font across all themes: **Outfit** (self-hosted, 32 KB latin WOFF2). Swi
 
 ## Quick start
 
+### Option A: Portable App for Windows (No Node.js Required)
+
+If you don't have Node.js or Git installed:
+
+1. Download **`DeskDeck-Windows-x64.zip`** from [GitHub Releases](https://github.com/SC136/phone-dock/releases).
+2. Extract the zip anywhere on your computer.
+3. Double-click **`Start Desk Deck.bat`**.
+   - The dashboard opens in your browser, and the Desk Deck icon appears in your system tray.
+   - Right-click the tray icon and click **"Copy Phone URL"** to open it on your phone!
+4. *(Optional)* Double-click **`Enable Auto-Start on Boot.bat`** to start Desk Deck automatically whenever your PC turns on.
+
+---
+
+### Option B: Run from Source
+
 ```bash
 git clone https://github.com/SC136/phone-dock
 cd phone-dock
 npm install
-npm start          # or: npm run tray (runs in Windows system tray)
+npm start          # or: npm run tray (runs directly in Windows system tray)
 ```
 
 The terminal prints the URL:

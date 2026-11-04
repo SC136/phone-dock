@@ -1,0 +1,59 @@
+name: Build & Release Portable Desk Deck
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-zip:
+    name: Build Windows Portable Package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (build tool)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Run portable packaging script
+        shell: powershell
+        run: |
+          .\tools\package-portable.ps1 -NodeVersion "v22.14.0"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeskDeck-Windows-x64
+          path: dist/DeskDeck-Windows-x64.zip
+          if-no-files-found: error
+
+      - name: Create or Update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/DeskDeck-Windows-x64.zip
+          name: Desk Deck ${{ github.ref_name }}
+          body: |
+            ### 📱 Desk Deck Portable for Windows (No Node.js Required)
+
+            Turn your spare phone into a desk dock without needing Node.js or Git installed!
+
+            #### How to use:
+            1. Download `DeskDeck-Windows-x64.zip` below and extract it anywhere on your PC.
+            2. Double-click **`Start Desk Deck.bat`**.
+            3. The dashboard will open in your browser, and a Desk Deck icon will appear in your system tray (bottom-right taskbar).
+            4. Right-click the tray icon and click **"Copy Phone URL"** to open it on your phone!
+          draft: false
+          prerelease: false
