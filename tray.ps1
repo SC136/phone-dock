@@ -9,6 +9,14 @@ if (-not $mutex.WaitOne(0, $false)) {
     exit
 }
 
+# The mutex only covers this session; a second host can still appear from another
+# desktop/elevation, and two watchdogs spawn duplicate servers. Refuse to run alongside one.
+$otherHost = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*phone_dock*' -and
+    $_.CommandLine -like '*tray.ps1*' -and $_.ProcessId -ne $PID
+}
+if ($otherHost) { exit }
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -70,19 +78,23 @@ function Get-LanUrl {
     return "http://127.0.0.1:4321"
 }
 
-# Check if node server.js is already listening on 4321
-$conn = $null
-try {
-    $conn = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
-} catch {}
+# The OS TCP table is unreliable on this machine (it reports no listener while the
+# server answers fine), so "is the server up?" is asked over HTTP instead.
+function Test-ServerUp {
+    try {
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:4321/api/stats" -TimeoutSec 3 -UseBasicParsing
+        return $r.StatusCode -eq 200
+    } catch { return $false }
+}
 
 $script:serverProc = $null
-if ($conn) {
-    try {
-        $script:serverProc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-    } catch {}
-} else {
+if (-not (Test-ServerUp)) {
     $script:serverProc = Start-Process -FilePath $nodeExe -ArgumentList "server.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
+} else {
+    try {
+        $owner = (Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue).OwningProcess
+        if ($owner) { $script:serverProc = Get-Process -Id $owner -ErrorAction SilentlyContinue }
+    } catch {}
 }
 
 # Set up Tray Icon
@@ -142,16 +154,15 @@ $itemRestart.Add_Click({
 
 $menu.Items.Add("-") | Out-Null
 
-# Watchdog timer to ensure server stays alive
+# Watchdog: restarts the server only if it has exited and does not answer over HTTP.
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({
-    try {
-        $active = Get-NetTCPConnection -LocalPort 4321 -State Listen -ErrorAction SilentlyContinue
-        if (-not $active) {
+    if (-not $script:serverProc -or $script:serverProc.HasExited) {
+        if (-not (Test-ServerUp)) {
             $script:serverProc = Start-Process -FilePath $nodeExe -ArgumentList "server.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
         }
-    } catch {}
+    }
 })
 $timer.Start()
 

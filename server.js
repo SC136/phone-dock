@@ -213,21 +213,50 @@ function broadcast() {
   }
 }
 
-async function fastSample() {
-  if (busy.fast) return;
+// CPU load and memory are read from the OS directly every 2s — no child processes.
+// (si.currentLoad/si.mem shell out to PowerShell on Windows, which was the source of
+// the constant PowerShell churn; see the intervals at the bottom of this section.)
+let lastCpuTimes = os.cpus().map((c) => c.times);
+
+function cpuLoadNative() {
+  const now = os.cpus().map((c) => c.times);
+  let idle = 0;
+  let total = 0;
+  for (let i = 0; i < now.length; i++) {
+    const a = lastCpuTimes[i] || now[i];
+    const b = now[i];
+    const aTotal = a.user + a.nice + a.sys + a.idle + a.irq;
+    const bTotal = b.user + b.nice + b.sys + b.idle + b.irq;
+    idle += Math.max(0, b.idle - a.idle);
+    total += Math.max(0, bTotal - aTotal);
+  }
+  lastCpuTimes = now;
+  return total > 0 ? round1((1 - idle / total) * 100) : null;
+}
+
+function fastSample() {
+  const load = cpuLoadNative();
+  if (load != null) stats.cpu.load = load;
+  const total = os.totalmem();
+  const used = total - os.freemem();
+  stats.mem = {
+    total,
+    used,
+    percent: round1((used / total) * 100) ?? 0,
+    swapTotal: 0,
+    swapUsed: 0,
+  };
+  stats.uptime = os.uptime();
+  stats.at = Date.now();
+  broadcast();
+}
+
+// Network stats still need one PowerShell call (Get-NetAdapterStatistics), so this
+// runs on its own slower cadence and only while a phone is watching.
+async function netSample() {
+  if (busy.fast || !sseClients.size) return;
   busy.fast = true;
   try {
-    const [load, mem] = await Promise.all([si.currentLoad(), si.mem()]);
-    stats.cpu.load = round1(load.currentLoad) ?? 0;
-    stats.cpu.cores = load.cpus?.length || stats.cpu.cores;
-    const used = mem.active || mem.used || 0;
-    stats.mem = {
-      total: mem.total,
-      used,
-      percent: round1((used / mem.total) * 100) ?? 0,
-      swapTotal: mem.swaptotal || 0,
-      swapUsed: mem.swapused || 0,
-    };
     if (!netIface) {
       const def = await si.networkInterfaceDefault().catch(() => null);
       netIface = typeof def === 'string' ? def : def?.iface || null;
@@ -239,49 +268,39 @@ async function fastSample() {
       rx: Math.max(0, nic.rx_sec ?? 0),
       tx: Math.max(0, nic.tx_sec ?? 0),
     };
-    stats.uptime = os.uptime();
-    stats.at = Date.now();
     broadcast();
   } catch (err) {
-    console.warn('[stats] fast sample failed:', err.message);
+    console.warn('[stats] network sample failed:', err.message);
   } finally {
     busy.fast = false;
   }
 }
 
-const WIN_THERMAL_SCRIPT = `
-try {
-  $samples = (Get-Counter "\\\\Thermal Zone Information(*)\\\\High Precision Temperature" -ErrorAction Stop).CounterSamples
-  $target = $samples | Where-Object { $_.InstanceName -match "thrm|cpu|pkg|package" } | Select-Object -First 1
-  if (-not $target) { $target = $samples | Sort-Object CookedValue -Descending | Select-Object -First 1 }
-  if ($target -and $target.CookedValue -gt 2732) {
-    [math]::Round(($target.CookedValue - 2732) / 10)
-    exit
-  }
-} catch {}
-try {
-  $samples = (Get-Counter "\\\\Thermal Zone Information(*)\\\\Temperature" -ErrorAction Stop).CounterSamples
-  $target = $samples | Where-Object { $_.InstanceName -match "thrm|cpu|pkg|package" } | Select-Object -First 1
-  if (-not $target) { $target = $samples | Sort-Object CookedValue -Descending | Select-Object -First 1 }
-  if ($target -and $target.CookedValue -gt 273) {
-    [math]::Round($target.CookedValue - 273.15)
-    exit
-  }
-} catch {}
-`;
+// The counter path is built from char codes so no backslash escaping can go wrong
+// through the source file (a mangled copy of this path was silently returning "").
+// typeperf answers in ~40ms where a cold PowerShell takes ~2s and spawns far more CPU.
+const BS = String.fromCharCode(92);
+const THERMAL_COUNTER = `${BS}Thermal Zone Information(*)${BS}High Precision Temperature`;
 
 function getWindowsCpuTemp() {
   return new Promise((resolve) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', WIN_THERMAL_SCRIPT],
-      { timeout: 3000, windowsHide: true },
-      (err, stdout) => {
-        if (err || !stdout) return resolve(null);
-        const val = parseInt(stdout.trim(), 10);
-        resolve(!isNaN(val) && val > 0 && val < 125 ? val : null);
+    execFile('typeperf', [THERMAL_COUNTER, '-sc', '1'], { timeout: 4000, windowsHide: true }, (err, stdout) => {
+      // Output: a quoted header row naming the instances, then one quoted data row.
+      const rows = String(stdout || '')
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith('"'));
+      if (!rows.length) return resolve(null);
+      const values = [];
+      for (const row of rows) {
+        for (const field of row.split('","')) {
+          const v = parseFloat(field.replace(/"/g, ''));
+          if (Number.isFinite(v) && v > 2732 && v < 4000) values.push((v - 2732) / 10);
+        }
       }
-    );
+      if (!values.length) return resolve(null);
+      const celsius = Math.round(Math.max(...values)); // the CPU diode reads hottest
+      resolve(celsius > 0 && celsius < 125 ? celsius : null);
+    });
   });
 }
 
@@ -295,20 +314,21 @@ async function readCpuTemperature() {
   return siTemp.main > 0 ? Math.round(siTemp.main) : siTemp.max > 0 ? Math.round(siTemp.max) : null;
 }
 
-async function mediumSample() {
-  if (busy.medium) return;
+// One PowerShell process per call — so these run slowly and only while a phone is
+// watching. si.graphics() alone spawns six PowerShell processes, so the GPU is
+// queried once at boot (model/VRAM never change) instead of on a timer.
+let tempAt = 0;
+
+async function sysSample() {
+  if (busy.medium || !sseClients.size) return;
   busy.medium = true;
   try {
-    const [temp, fsList, procs] = await Promise.all([
-      readCpuTemperature(),
-      si.fsSize().catch(() => []),
-      si.processes().catch(() => ({ list: [] })),
-    ]);
-    stats.cpu.temp = temp;
-    stats.disks = (fsList || [])
-      .filter((d) => d.size > 0)
-      .map((d) => ({ mount: d.mount, use: round1(d.use) ?? 0, used: d.used, size: d.size }))
-      .slice(0, 4);
+    const procs = await si.processes().catch(() => ({ list: [] }));
+    // Retry soon after a failed read instead of locking in null for 30s.
+    if (Date.now() - tempAt > (stats.cpu.temp == null ? 7000 : 30000)) {
+      tempAt = Date.now();
+      stats.cpu.temp = await readCpuTemperature();
+    }
     stats.procs = (procs.list || [])
       .filter((p) => p.name && !/^(system idle process|idle)$/i.test(p.name))
       .slice()
@@ -317,17 +337,32 @@ async function mediumSample() {
       .map((p) => ({ name: p.name, cpu: round1(p.cpu) ?? 0, mem: round1(p.mem) ?? 0 }));
     broadcast();
   } catch (err) {
-    console.warn('[stats] medium sample failed:', err.message);
+    console.warn('[stats] sys sample failed:', err.message);
   } finally {
     busy.medium = false;
   }
 }
 
-async function slowSample() {
-  if (busy.slow) return;
+async function diskSample() {
+  if (busy.slow || !sseClients.size) return;
   busy.slow = true;
   try {
-    const gfx = await si.graphics().catch(() => ({}));
+    const fsList = await si.fsSize().catch(() => []);
+    stats.disks = (fsList || [])
+      .filter((d) => d.size > 0)
+      .map((d) => ({ mount: d.mount, use: round1(d.use) ?? 0, used: d.used, size: d.size }))
+      .slice(0, 4);
+    broadcast();
+  } catch (err) {
+    console.warn('[stats] disk sample failed:', err.message);
+  } finally {
+    busy.slow = false;
+  }
+}
+
+async function primeGpu() {
+  try {
+    const gfx = await si.graphics();
     const ctrl = (gfx.controllers || [])[0];
     if (ctrl) {
       stats.gpu = {
@@ -338,11 +373,16 @@ async function slowSample() {
       };
       broadcast();
     }
-  } catch (err) {
-    console.warn('[stats] slow sample failed:', err.message);
-  } finally {
-    busy.slow = false;
+  } catch {
+    /* GPU info is cosmetic */
   }
+}
+
+// Called when a phone connects, so the first frame is fresh without a 15s wait.
+function sampleOnDemand() {
+  netSample();
+  sysSample();
+  diskSample();
 }
 
 async function primeCpuInfo() {
@@ -355,8 +395,9 @@ async function primeCpuInfo() {
 }
 
 setInterval(fastSample, 2000);
-setInterval(mediumSample, 6000);
-setInterval(slowSample, 20000);
+setInterval(netSample, 6000);
+setInterval(sysSample, 15000);
+setInterval(diskSample, 120000);
 setInterval(() => {
   for (const res of sseClients) {
     try {
@@ -1052,6 +1093,7 @@ const server = http.createServer(async (req, res) => {
       res.write('retry: 3000\n\n');
       res.write(`data: ${JSON.stringify(stats)}\n\n`);
       sseClients.add(res);
+      sampleOnDemand();
       req.on('close', () => sseClients.delete(res));
       return;
     }
@@ -1112,8 +1154,8 @@ function lanAddresses() {
 server.listen(config.port, '0.0.0.0', async () => {
   await primeCpuInfo();
   fastSample();
-  mediumSample();
-  slowSample();
+  primeGpu();
+  diskSample();
   readAgents().catch(() => {});
 
   const urls = lanAddresses().map((ip) => `  http://${ip}:${config.port}`);
